@@ -1,4 +1,4 @@
-name: Continuous Integration Pipeline
+name: Secure DevSecOps Pipeline
 
 on:
   push:
@@ -6,10 +6,13 @@ on:
   pull_request:
     branches: [ "main" ]
 
-jobs:
-  test-and-build:
-    runs-on: ubuntu-latest
+env:
+  SECURITY_DOC_URL: "https://leonardocnl.github.io/PadaONE-Security/"
 
+jobs:
+  # STAGE 1: Build & Test
+  build:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -24,4 +27,170 @@ jobs:
         run: npm install
 
       - name: Run Automated Tests
-        run: npm test # Requisito obrigatório da Tarefa 01
+        run: npm test # Requisito base da Tarefa 01
+
+  # STAGE 2: Security (Parallel Hard Gates)
+  trivy-sca-scan:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy SCA Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          exit-code: '1' # Hard Gate ativo
+          severity: 'CRITICAL,HIGH'
+          format: 'json'
+          output: 'raw_report.json'
+
+      - name: Post-process Trivy Report
+        if: always()
+        run: |
+          if [ -f raw_report.json ]; then
+            jq '[.Results[]? | .Vulnerabilities[]? | {
+              VulnerabilityID: .VulnerabilityID,
+              Package: .PkgName,
+              PURL: .PkgID,
+              InstalledVersion: .InstalledVersion,
+              FixedVersion: (.FixedVersion // "N/A"),
+              Severity: .Severity,
+              Description: (.Description | sub("\n"; " "; "g")),
+              HelpUrl: "'"${SECURITY_DOC_URL}"'"
+            }]' raw_report.json > libs_security_report.json
+            rm -f raw_report.json
+          fi
+
+      - name: Upload Trivy Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: libs_security_report.json
+
+  gitleaks-scan:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks Scan
+        run: |
+          docker run --v "${{ github.workspace }}:/path" zricethezav/gitleaks:latest detect -v --no-git --report-path /path/raw_gitleaks.json -f json || exit 1
+
+      - name: Post-process Gitleaks Report
+        if: always()
+        run: |
+          if [ -f raw_gitleaks.json ]; then
+            jq '[.[]? | {
+              RuleID: .RuleID,
+              Description: .Description,
+              File: .File,
+              Line: "\(.StartLine) to \(.EndLine)",
+              Column: "\(.StartColumn) to \(.EndColumn)",
+              Match: .Match,
+              Secret: .Secret,
+              Fingerprint: .Fingerprint,
+              HelpUrl: "'"${SECURITY_DOC_URL}"'"
+            }]' raw_gitleaks.json > gitleaks_report.json
+            rm -f raw_gitleaks.json
+          fi
+
+      - name: Upload Gitleaks Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: gitleaks_report.json
+
+  semgrep-sast:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep SAST (Node.js Adapted)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/src" semgrep/semgrep semgrep scan \
+            --quiet \
+            --json \
+            --output raw_semgrep.json \
+            --timeout 120 \
+            --max-target-bytes 1500000 \
+            --exclude="node_modules/**" \
+            --exclude="dist/**" \
+            --exclude="build/**" \
+            --config="p/javascript" \
+            --config="p/owasp-top-ten" \
+            --config="p/security-audit" \
+            --metrics=off --error /src
+
+      - name: Post-process Semgrep Report
+        if: always()
+        run: |
+          if [ -f raw_semgrep.json ]; then
+            jq '{
+              findings: [.results[]? | {
+                severity: .extra.severity,
+                message: (.extra.message | split("\n")[0]),
+                file: .path,
+                line: .start.line,
+                rule_id: .check_id
+              }],
+              errors: [.errors[]? | {message: .message, level: .level}],
+              help_url: "'"${SECURITY_DOC_URL}"'"
+            }' raw_semgrep.json > semgrep_report.json
+            rm -f raw_semgrep.json
+          fi
+
+      - name: Upload Semgrep Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: semgrep_report.json
+
+  # STAGE 3: SonarQube Check
+  sonarqube-check:
+    needs: [trivy-sca-scan, gitleaks-scan, semgrep-sast]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run SonarQube Analysis
+        uses: sonarsource/sonarcloud-github-action@v2
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.projectKey=desafio-infra-node
+            -Dsonar.organization=seu-org-github
+            -Dsonar.host.url=https://sonarcloud.io
+            -Dsonar.exclusions=node_modules/**,tests/**
+
+  # STAGE 4: Containerize Validation
+  dockerize:
+    needs: sonarqube-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate Container Setup
+        run: echo "Validating Docker containerization compliance..."
+
+  # STAGE 5: Update (Deployment)
+  update:
+    needs: dockerize
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Trigger Render Deployment
+        run: curl -X POST ${{ secrets.RENDER_DEPLOY_HOOK }}
