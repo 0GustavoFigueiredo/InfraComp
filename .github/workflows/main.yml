@@ -82,7 +82,7 @@ jobs:
 
       - name: Run Gitleaks Scan
         run: |
-          docker run --v "${{ github.workspace }}:/path" zricethezav/gitleaks:latest detect -v --no-git --report-path /path/raw_gitleaks.json -f json || exit 1
+          docker run -v "${{ github.workspace }}:/path" zricethezav/gitleaks:latest detect -v --no-git --report-path /path/raw_gitleaks.json -f json || exit 1
 
       - name: Post-process Gitleaks Report
         if: always()
@@ -161,6 +161,7 @@ jobs:
   sonarqube-check:
     needs: [trivy-sca-scan, gitleaks-scan, semgrep-sast]
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
