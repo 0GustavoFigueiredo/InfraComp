@@ -6,9 +6,6 @@ on:
   pull_request:
     branches: [ "main" ]
 
-env:
-  SECURITY_DOC_URL: "https://leonardocnl.github.io/PadaONE-Security/"
-
 jobs:
   # STAGE 1: Build & Test
   build:
@@ -27,7 +24,7 @@ jobs:
         run: npm install
 
       - name: Run Automated Tests
-        run: npm test # Requisito base da Tarefa 01
+        run: npm test
 
   # STAGE 2: Security (Parallel Hard Gates)
   trivy-sca-scan:
@@ -42,7 +39,7 @@ jobs:
         with:
           scan-type: 'fs'
           scan-ref: '.'
-          exit-code: '1' # Hard Gate ativo
+          exit-code: '1'
           severity: 'CRITICAL,HIGH'
           format: 'json'
           output: 'raw_report.json'
@@ -58,8 +55,7 @@ jobs:
               InstalledVersion: .InstalledVersion,
               FixedVersion: (.FixedVersion // "N/A"),
               Severity: .Severity,
-              Description: (.Description | sub("\n"; " "; "g")),
-              HelpUrl: "'"${SECURITY_DOC_URL}"'"
+              Description: (.Description | sub("\n"; " "; "g"))
             }]' raw_report.json > libs_security_report.json
             rm -f raw_report.json
           fi
@@ -96,8 +92,7 @@ jobs:
               Column: "\(.StartColumn) to \(.EndColumn)",
               Match: .Match,
               Secret: .Secret,
-              Fingerprint: .Fingerprint,
-              HelpUrl: "'"${SECURITY_DOC_URL}"'"
+              Fingerprint: .Fingerprint
             }]' raw_gitleaks.json > gitleaks_report.json
             rm -f raw_gitleaks.json
           fi
@@ -144,12 +139,11 @@ jobs:
                 line: .start.line,
                 rule_id: .check_id
               }],
-              errors: [.errors[]? | {message: .message, level: .level}],
-              help_url: "'"${SECURITY_DOC_URL}"'"
+              errors: [.errors[]? | {message: .message, level: .level}]
             }' raw_semgrep.json > semgrep_report.json
             rm -f raw_semgrep.json
           fi
-
+          
       - name: Upload Semgrep Artifact
         if: always()
         uses: actions/upload-artifact@v4
